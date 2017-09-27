@@ -1,0 +1,318 @@
+---
+title: "Quick and Preliminary Analysis of Mussel Larval Dispersal Pathways"
+output: html_notebook
+---
+
+I ran some preliminary analyses as part of my current research studying mussel larval connectivity (see https://www.intertidalbuffet.com/population-connectivity for details and other analysis). They were interesting enough, and fun enough to code, that I decided to post my process online. Before we get into the analysis though, here's a bit of back-story.
+
+## Mussel Dispersal
+Mussels are basically sedentary as adults, and don't move from the rock/dock/whatever they're attached to. That means that the mussel you order at a restaurant has always lived exactly where the fisherman caught it (before it wound up on your plate of course). Even though that mussel hasn't moved as an adult though, the mussel was born somewhere very different, and as a baby (aka "larvae"), floated through the water with ocean currents until settling down somewhere new to grow up and eventually be caught by the fisherman. This larval dispersal phase is important to connecting mussel populations separated across large spatial scales, and can be very important to managing mussel populations for fisheries, or predicting how mussel populations might react to things like climate change (again, see see the blog section of https://www.intertidalbuffet.com/population-connectivity for details).
+
+## Research Goal
+Some colleagues and I are trying to understand how mussel populations in Maine are connected to each other - so, if you see an adult mussel on a rock, be able to predict where that mussel was born and traveled from as a larvae. One way we are doing this is using the chemical composition of mussel shells.
+
+#### How Mussel Shell Chemistry Helps Us
+When a mussel is born, it starts growing a shell within 24-hours. The mussel needs calcium to grow its shell, and so extracts calcium from the water around it. By accident, when taking this calcium from the water, the mussel also takes all the other chemicals/elements in the water around it and binds them up in its shell. Because the chemistry of the water changes as you go from one place to another along the coast, that mussel is unintentionally tagging itself with a chemical signal of where it was born.
+
+As scientists, we raised mussel larvae up and down the coast, letting them grow in these different chemistry waters. We then took those mussel larvae, blasted their shells with a laser, and sucked the aerosolized shell into a "mass spectrometer" to measure the chemistry. Based on this data, we can build a map of what mussel shell chemistry should look like if a mussel was born at different places up and down the coast. Then, we can take a wild mussel that just settled down to grow up into an adult, look at the chemistry of that mussel's larval shell, and compare it to the map to see where the wild mussel was born.
+
+#### How This Analysis Should Work
+The intent of this analysis will be to train a model so we can feed it mussel shell chemistry data, and it predicts where that chemistry matches on our map. We will train the model with the chemistry data from larvae we raised in different bays up and down the Maine coastline. We will then predict the larval sources (birthplace) for wild mussel settlers that we gathered in mussel beds.
+
+## The Analysis
+
+#### Data cleaning and prep
+So first, we load a bunch of packages we'll need, and import the data set. You can see that the data, where each line is an individual mussel shell, have a bunch of data on the where that mussel shell was collected, and then the chemistry data of that shell. In this case, the "Site" corresponds to the bay name, and all of the 2 letter codes (e.g., "Mg", "Mn", etc) represent different chemical elements.
+```{r, message=FALSE, warning=FALSE}
+# Load the necessary packages
+library(plyr)
+library(reshape2)
+library(MASS)
+library(stats)
+library(ggplot2)
+library(ggmap)
+
+
+# Read in the ICPMS geochemistry data from 2015
+
+ICPMS.all.2015.dat<-read.csv("/Users/scottmorello/Dropbox/Archives/Jobs/Data Science Search/Insight/Insight_Interview_Code/2015.All.Data.csv")
+head(ICPMS.all.2015.dat)
+```
+
+Now we subset out just the chemistry data for the larvae, and divide it up between the site level data (.env) and chemistry data (.val). This larval data corresponds to the mussel larvae we raised in each of the bays up and down the coast, and are used to build out map. Thus, we'll use this data to eventually train our model to classify chemistry signals to the correct bay/site.
+```{r, message=FALSE, warning=FALSE}
+# Subset out the data from larvae raised in each bay to train the model
+# I'll need to turn Site into a factor, separate out the actual values (".val")
+# and data about the sites (".env")
+larvae.dat<-subset(ICPMS.all.2015.dat,Type=="Larvae")
+larvae.dat$Site<-factor(larvae.dat$Site)
+larvae.dat.env<-larvae.dat[,c(1:4)]
+larvae.dat.val<-larvae.dat[,-c(1:4)]
+head(larvae.dat.env)
+head(larvae.dat.val)
+```
+
+I then want to test whether the chemistry data is normally distributed for each group (site). There are certain normality assumptions for the tests I'll use later, so we should deal with the issue now. I wind up writing a function that will cycle through each unique site and chemical element, and test for normality using a Shapiro-Wilk test. The function will return a list where one table are the p-values associated with Shapiro-Wilk test, and a table of True/False values for whether the test result was significant based on an alpha > 0.05 (True = Normal, False = Not Normal).
+
+I find that the raw chemistry data is pretty non-normal.
+```{r, message=FALSE, warning=FALSE}
+# I want test whether data are normally disrtributed, so I make a function to itteratively
+# go through each group (site), and test normality of each varaible (geochemical element)
+# using a shapiro wilk test
+
+all.norm.test<-function(unique.sites,norm.test.data,norm.test.env){
+  sites.normtest<-data.frame(site=unique.sites,Mg=NA,Mn=NA,Co=NA,Cu=NA,Sr=NA,Ba=NA,La=NA,Pb=NA)
+  for (i in 1:length(unique.sites)){
+    sites.normtest[i,"Mg"]<-shapiro.test(norm.test.data[which(norm.test.env$Site==unique.sites[i]),"Mg"])[2]
+    sites.normtest[i,"Mn"]<-shapiro.test(norm.test.data[which(norm.test.env$Site==unique.sites[i]),"Mn"])[2]
+    sites.normtest[i,"Co"]<-shapiro.test(norm.test.data[which(norm.test.env$Site==unique.sites[i]),"Co"])[2]
+    sites.normtest[i,"Cu"]<-shapiro.test(norm.test.data[which(norm.test.env$Site==unique.sites[i]),"Cu"])[2]
+    sites.normtest[i,"Sr"]<-shapiro.test(norm.test.data[which(norm.test.env$Site==unique.sites[i]),"Sr"])[2]
+    sites.normtest[i,"Ba"]<-shapiro.test(norm.test.data[which(norm.test.env$Site==unique.sites[i]),"Ba"])[2]
+    sites.normtest[i,"La"]<-shapiro.test(norm.test.data[which(norm.test.env$Site==unique.sites[i]),"La"])[2]
+    sites.normtest[i,"Pb"]<-shapiro.test(norm.test.data[which(norm.test.env$Site==unique.sites[i]),"Pb"])[2]
+  }
+  sites.normtest.list<-list(P.Values=cbind(data.frame(Site=sites.normtest$site),round(sites.normtest[,-1],4)),
+                            Significance=cbind(data.frame(Site=sites.normtest$site),sites.normtest[,-1]>0.05))
+  return(sites.normtest.list)
+}
+
+# Now I test for normality, and most variables are not normally distributed
+
+unique.sites.larv<-unique(larvae.dat.env$Site)
+all.norm.test(unique.sites.larv,larvae.dat.val,larvae.dat.env)
+```
+
+I log transform the chemistry data, and that mostly solves the problem.
+```{r, message=FALSE, warning=FALSE}
+# I log transform the data to normalize it, which mostly solves the problem
+
+larvae.dat.val.trans<-log(larvae.dat.val,10)
+all.norm.test(unique.sites.larv,larvae.dat.val.trans,larvae.dat.env)
+```
+
+The remaining groups/elements that do not pass the Shapiro-Wilk test, I look at their Q-Q Plots to assess normality more subjectively. Generally, they look pretty good, aside from issues such as single outliers and some long tails. I decide that the log transformation is doing all I need it to, and that it's more important for me to retain as much data as possible to train the model - considering I'll be dealing with low sample sizes (yes, that becomes an issue later).
+
+```{r, fig.height=5, fig.width=5, message=FALSE, warning=FALSE}
+
+# I write a script just to look at the data that failed the Shapiro-Wilk test,
+# and plot the Q-Q plot so I can look at them. Generaly, they look ok, except
+# for a few which either have a single outlier, or some long tails. Either way, I
+# choose to stick with the log transformation
+
+sig.dat<-all.norm.test(unique.sites.larv,larvae.dat.val.trans,larvae.dat.env)$Significance
+rownames(sig.dat)<-sig.dat$Site
+sig.dat<-sig.dat[,-1]
+false.vec <- arrayInd(which(sig.dat==FALSE), dim(sig.dat))
+
+par(mfrow=c(ceiling(sqrt(nrow(false.vec))),floor(sqrt(nrow(false.vec)))))
+for (i in 1:nrow(false.vec)){
+  qqnorm(larvae.dat.val.trans[which(larvae.dat.env$Site==dimnames(sig.dat)[[1]][false.vec[i,1]]),
+                              dimnames(sig.dat)[[2]][false.vec[i,2]]],
+         main=paste(dimnames(sig.dat)[[1]][false.vec[i,1]],dimnames(sig.dat)[[2]][false.vec[i,2]]))
+}
+
+par(mfrow=c(1,1))
+```
+
+So now that I have the training data set, I subset out the test data - chemistry data from the larval shells of wild mussel settlers. I need to correct a few of the site labels since the "TFP" site has multiple names in the data set, but is really only one site. I log transform this data too, which seems to do a decent job of normalizing the data again.
+
+```{r, message=FALSE, warning=FALSE}
+# Now I do the same, subsetting and transformation, but with data from settled mussels
+# which we would like to assign to a bay, based on the larval geochemical data I
+# imported before. I need to correct one set of names though (2 TFP sites into 1)
+settler.dat<-subset(ICPMS.all.2015.dat,Type=="Settler")
+settler.dat$Site[which(settler.dat$Site=="TFP_1")]<-"TFP"
+settler.dat$Site[which(settler.dat$Site=="TFP_2")]<-"TFP"
+settler.dat$Site<-factor(settler.dat$Site)
+settler.dat.env<-settler.dat[,c(1:4)]
+settler.dat.val<-settler.dat[,-c(1:4)]
+settler.dat.val.trans<-log(settler.dat.val,10)
+
+unique.sites.settler<-unique(settler.dat.env$Site)
+all.norm.test(unique.sites.settler,settler.dat.val.trans,settler.dat.env)
+```
+
+For those data that don't seem normal, I take a look at the Q-Q plots again, which I'm OK with for the same reasons I stated before.
+
+```{r, fig.height=3, fig.width=3, message=FALSE, warning=FALSE}
+
+sig.dat<-all.norm.test(unique.sites.settler,settler.dat.val.trans,settler.dat.env)$Significance
+rownames(sig.dat)<-sig.dat$Site
+sig.dat<-sig.dat[,-1]
+false.vec <- arrayInd(which(sig.dat==FALSE), dim(sig.dat))
+
+par(mfrow=c(ceiling(sqrt(nrow(false.vec))),floor(sqrt(nrow(false.vec)))+1))
+for (i in 1:nrow(false.vec)){
+  qqnorm(settler.dat.val.trans[which(settler.dat.env$Site==dimnames(sig.dat)[[1]][false.vec[i,1]]),
+                               dimnames(sig.dat)[[2]][false.vec[i,2]]],
+         main=paste(dimnames(sig.dat)[[1]][false.vec[i,1]],dimnames(sig.dat)[[2]][false.vec[i,2]]))
+}
+
+par(mfrow=c(1,1))
+```
+
+#### The model
+
+I choose to use a Quadratic Discriminant Function Analysis (QDA) for a variety of reasons. For one, it's the most common method for classifying chemical signatures in ecology. That's not always a good reason to use an analysis though, and so QDA is also relatively interpretable and easy to understand. That, and because it's been around for a while, are probably why it is so commonly used in ecology. A QDA predicts group membership based on pre-trained groupings by calculating discriminant axes with quadratic combinations of chemical elements. The analysis attempts to minimize the variation within groups and maximize the variation between groups. To be candid, we are working on developing other classification models with our research (e.g., Random Forrest, Infinite Mixture Models), but for today's preliminary analysis, I thought it best to use something pretty common in the field for doing what we'd like to.
+
+#### Training the model
+
+So first, we use train the QDA with the chemistry data from larvae we raised - since we know which bays those chemistry signals correspond to. We also use leave-one-out Cross-Validation to test how accurate well the model is at predicting a site based on chemistry data. Looking at the confusion matrix, the model actually doesn't do so well. It only classifies ~30% of data correctly.
+
+```{r, message=FALSE, warning=FALSE}
+# So now I setup a Quadratic Discriminant Function analysis.
+# I chose quadratic becasue the covariance matrices are more than likely
+# unequal among groups (sites), based on previous research.
+
+geochem.qda <- qda(larvae.dat.val.trans, larvae.dat.env$Site)
+
+# I'll evaluate the model using Cross Validation
+geochem.qda.CV <- qda(larvae.dat.val.trans, larvae.dat.env$Site,CV=TRUE)
+
+# and now look at the confusion matrix, the overall correct assignments (total), and the
+# group (site) specific correct assignments
+confusion.table<-table(data.frame(Predicted=geochem.qda.CV$class,Actual=larvae.dat.env$Site))
+confusion.table.total<-sum(confusion.table[row(confusion.table)==col(confusion.table)])/sum(confusion.table)
+confusion.table.total
+```
+
+When we look at the breakdown by site, there's a pretty broad range.
+
+```{r, message=FALSE, warning=FALSE}
+confusion.table.diag<-diag(confusion.table/rowSums(confusion.table))
+confusion.table.diag
+```
+
+This begs the question: "why are our classifications so bad?". If we look at how the percent correctly classified to a site relates to how many individual larvae were used to train that site's signal in the QDA model, there is a pretty direct relationship (i.e., more individuals used to train a site = better classification). This is depicted below with the statistical output from a linear model (and a Q-Q plot to check the fit), and a graphical the output from the linear model showing the fit (black solid line) and 95% CIs (red dotted lines).
+```{r, message=FALSE, warning=FALSE}
+# The correct assignments by site seem to be pretty well related to the training sample size
+# explaining about 60% of the observed variaiton
+train.sizes<-summary(geochem.qda.CV$class)
+size.confusion.lm<-lm(confusion.table.diag~train.sizes)
+summary(size.confusion.lm)
+plot(size.confusion.lm,which=2)
+size.confusion.predicted<-predict(size.confusion.lm,data.frame(train.sizes=c(0:100)),interval = "confidence")
+plot(confusion.table.diag~train.sizes,ylab="Percent Correctly Assigned",xlab="Training Set Sample Size")
+lines(c(0:100), size.confusion.predicted[ ,1], lty = "solid", col = "black")
+lines(c(0:100), size.confusion.predicted[ ,2], lty = "dashed", col = "red")
+lines(c(0:100), size.confusion.predicted[ ,3], lty = "dashed", col = "red")
+```
+
+Unfortunately, there isn't much we can do with this preliminary analysis. As our lab processes more samples, and builds a larger training data set, the accuracy of our model will hopefully improve. In the meantime, if we want to understand larval connectivity in mussels, this is all we have to work with, so let's continue.
+
+
+#### Predicting The Birthplace of Settled Mussels
+
+I take the data set of wild mussel settler shell chemistry (which the mussels laid down when they were born), and use the QDA to predict the site where that chemistry came from. I implement a flat prior, based on the total number of sites, since we have no underlying assumptions as to which source site produced the most settlers. Below is a plot of the posterior distribution of site assignments, where the x axis are the sites a settler was assigned to based on its shell chemistry, the y axis is the frequency it was assigned to that site, and the panels separate out The site that mussel was found/settled in (i.e., where it traveled to and will grow to be an adult).
+```{r, message=FALSE, warning=FALSE}
+# Now I'll try to assign settled mussels to sources based on the trained QDFA of geochemical
+# signitures, and use a flat prior
+
+n.sources<-length(unique.sites.larv)
+settler.prediction<-predict(geochem.qda,settler.dat.val.trans,prior=(rep(1,n.sources)/n.sources))
+
+# Now let me plot the posterior assignments to see how they're looking. The
+# model seems to indicate that the settlers are all coming from one source
+settler.prediction.melt<-as.data.frame(settler.prediction$posterior)
+settler.prediction.melt$Settled<-settler.dat.env$Site
+settler.prediction.melt$Individual<-factor(c(1:nrow(settler.prediction.melt)))
+settler.prediction.melt<-melt(settler.prediction.melt)
+
+colnames(settler.prediction.melt)<-c("Location_Settled","Individual","Source","Posterior_Assignment")
+
+settler.posterior.graph<-ggplot(settler.prediction.melt,aes(x=Source,y=Posterior_Assignment,group=Individual))+
+  geom_line()+
+  facet_wrap(~Location_Settled,ncol=1)+
+  theme_bw()
+
+settler.posterior.graph
+```
+
+We can already see that most wild mussel settlers were predicted to have come from the sites CHR
+or PHB (x axis), no matter where they ended up settling (panels). But, for some settlers, even the site where it was predicted most likely to have come from (i.e., was most frequently assigned - the y axis), the assignment level was pretty low (<50% probability of assignment).
+
+To account for this, we run some Quality Control. For an individual settler, not only do we only keep the best predicted source based on the model, but we also only keep that source assignment if it's confidence in >50%.
+
+```{r, message=FALSE, warning=FALSE}
+# I summarize the posteriors for each group of settlers, only keeping the predicted source
+# with the greatest posterior probability of assignment. Then, I remove any individuals
+# where the maximum posterior probability was still <50%. Then I resummarize the data
+# by group (settlement site)
+settler.prediction.summary<-ddply(settler.prediction.melt,.(Individual,Location_Settled),
+                                  summarize,Max.Source=Source[which.max(Posterior_Assignment)],
+                                  Max.Val=Posterior_Assignment[which.max(Posterior_Assignment)])
+settler.prediction.summary.table<-table(subset(settler.prediction.summary,Max.Val>0.5)[,c(2,3)])/
+  rowSums(table(subset(settler.prediction.summary,Max.Val>0.5)[,c(2,3)]))
+
+# Now I collapse the data, and attach site coordinates to each settlement point and
+# source (I use the match function and another imported dataset)
+
+connect.table<-melt(settler.prediction.summary.table)
+colnames(connect.table)<-c("Settled","predicted_source","Connectivity")
+
+site.locs<-read.csv("/Users/scottmorello/Dropbox/Archives/Jobs/Data Science Search/Insight/Insight_Interview_Code/MuLTI-2_Station Information.csv")
+connect.table$to.lon<-site.locs$Longitude[match(as.character(connect.table$Settled),
+                                                as.character(site.locs$Station.Code))]
+connect.table$to.lat<-site.locs$Latitude[match(as.character(connect.table$Settled),
+                                               as.character(site.locs$Station.Code))]
+
+connect.table$from.lon<-site.locs$Longitude[match(as.character(connect.table$predicted_source),
+                                                  as.character(site.locs$Station.Code))]
+connect.table$from.lat<-site.locs$Latitude[match(as.character(connect.table$predicted_source),
+                                                 as.character(site.locs$Station.Code))]
+```
+
+Now I re plot the data as a bar graph, so that it shows for each settlement site along the coast (panels), which birth-site (x axis) settlers were most frequently came from (# of settlers predicted to come from a source/total # of settlers at a site - y axis).
+
+```{r, message=FALSE, warning=FALSE}
+# Now I plot the percent of settlers coming from each larval source by settlement site
+# We can see that sites have disproportionately high numbers of larvae coming
+# from CHR and PHB
+
+
+source.graph<-ggplot(connect.table,aes(x=predicted_source,y=Connectivity))+
+  geom_bar(stat="identity")+
+  facet_wrap(~Settled,ncol=1)+
+  xlab("Source")+
+  theme_bw()
+
+source.graph
+```
+
+#### Final Answer
+
+This sort of graphical display is pretty difficult to interpret and visualize without some help... so, "ggmap" package to the rescue! Here is a map showing how each site in northern Maine is connected to each other by larval dispersal. Each settlement site (white point) is connected to each birth place by an arrow (from birth place to settlement site). How dense that arrow is corresponds to the percent of settlers that came from that birth place (the darker the arrow, the more settlers were born there). To represent settlers that were born at a site and returned to their birthplace to settle, we use a black circle in the middle of the site (the larger the black circle, the more settlers returned to their birth place).
+
+```{r, message=FALSE, warning=FALSE}
+# Now, I can put all of this info onto a map to better visualize the connections among
+# sites (connectivity) and retention within sites.
+
+downeast.map <- get_map(location="Milbridge, Maine",maptype="terrain",zoom=9,crop=FALSE)
+
+connect.map <- ggmap(downeast.map) + 
+  geom_text(data=site.locs[,c(4,5,6)],aes(x=Longitude,y=Latitude,label=Station.Code),
+            size=4,color="black", vjust=2.75,fontface="bold")+
+  geom_point(data=site.locs[,c(5,6)],aes(x=Longitude,y=Latitude),size=10,color="black")+
+  geom_point(data=site.locs[,c(5,6)],aes(x=Longitude,y=Latitude),size=9,color="white")+
+  geom_point(data=connect.table[-which(as.character(connect.table$Settled)!=as.character(connect.table$predicted_source)),],
+             aes(x=to.lon,y=to.lat,size=Connectivity),color="black")+
+  geom_curve(data=connect.table[which(as.character(connect.table$Settled)!=as.character(connect.table$predicted_source)),], 
+             aes(x=to.lon, y=to.lat, xend=from.lon, yend=from.lat,colour=Connectivity,alpha=Connectivity,frame=predicted_source),
+             arrow=arrow(length=unit(0.4,"cm"), ends="first",angle=15),
+             color="black",curvature = 0.15,position = "jitter",inherit.aes=TRUE,size=1.5) +
+  coord_cartesian()+
+  labs(x="Longitude",y="Latitude")+
+  scale_x_continuous(limits = c(-68.4, -67.3), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(44.15, 44.85), expand = c(0, 0))+
+  scale_size_continuous(name="Self-Seeding")
+
+connect.map
+```
+
+The map does a good job of showing how settlers in the mid-coast area (e.g., GB, PHB, HBR, PLR) mostly come from a site to the northeast (CHR), or from within the mid-coast area (PHB). Settlers in the more southern area (TFP) generally come from the mid-coast (PHB), and occasionally from the area to the far northeast (CHR). This pattern is pretty consistent with other data and analyses we've conducted (see https://www.intertidalbuffet.com/population-connectivity for details and other analysis), and tells us that even though our QDA model accuracy needs to be improved (with more training data), the model is probably predicting where settlers come from pretty well!
+
+OK, that was a lot, and much more science-y than the rest of the stuff I include in this section of the webpage. If you have any questions or comments, feel free to email me!
+
+Hope you enjoyed the analysis!
+
